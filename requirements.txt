@@ -1,0 +1,2 @@
+pyaudio==0.2.11
+pyinstaller==5.13.0
