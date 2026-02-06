@@ -6,18 +6,33 @@ clients = []           # Socket объекты
 nicknames = []         # Никнеймы
 voice_clients = []     # Клиенты для голоса (отдельное соединение)
 
-# Текстовый сервер
+# Определяем локальный IP для вывода
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "не удалось определить"
+
+# Текстовый сервер (0.0.0.0 = принимать со всех интерфейсов)
 text_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-text_server.bind(('localhost', 5555))
+text_server.bind(('0.0.0.0', 5555))
 text_server.listen()
 
 # Голосовой сервер (отдельный порт)
 voice_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-voice_server.bind(('localhost', 5556))
+voice_server.bind(('0.0.0.0', 5556))
 voice_server.listen()
 
+local_ip = get_local_ip()
 print("🟢 Текстовый сервер запущен на порту 5555")
 print("🎤 Голосовой сервер запущен на порту 5556")
+print(f"🌐 Локальный IP: {local_ip}")
+print(f"💡 Клиенты в локальной сети: вводят {local_ip}")
+print(f"💡 Клиенты из интернета: вводят ваш публичный IP (проброс портов 5555, 5556)")
 print("Ожидание подключений...\n")
 
 # Рассылка текстовых сообщений
@@ -80,9 +95,9 @@ def handle_text_client(client):
                 else:
                     client.send("❌ Неизвестная команда. Используйте /help".encode('utf-8'))
             else:
-                # Обычное сообщение - рассылаем всем
+                # Обычное сообщение - рассылаем всем кроме отправителя
                 formatted_message = f"[{nickname}]: {message}"
-                broadcast_text(formatted_message)
+                broadcast_text(formatted_message, exclude_client=client)
                 print(f"📩 {formatted_message}")
             
         except:

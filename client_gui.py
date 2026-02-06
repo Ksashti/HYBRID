@@ -38,29 +38,35 @@ class VoiceChatClient:
         self.create_login_window()
     
     def create_login_window(self):
-        """Окно входа - ввод никнейма"""
+        """Окно входа - ввод никнейма и IP сервера"""
         self.login_window = tk.Tk()
         self.login_window.title("Вход в чат")
-        self.login_window.geometry("350x200")
+        self.login_window.geometry("350x270")
         self.login_window.resizable(False, False)
-        
+
         # Центрируем окно
-        self.center_window(self.login_window, 350, 200)
-        
-        tk.Label(self.login_window, text="Введите ваш никнейм:", font=("Arial", 12)).pack(pady=20)
-        
+        self.center_window(self.login_window, 350, 270)
+
+        tk.Label(self.login_window, text="IP сервера:", font=("Arial", 12)).pack(pady=(15, 0))
+
+        self.ip_entry = tk.Entry(self.login_window, font=("Arial", 12), width=20)
+        self.ip_entry.insert(0, "localhost")
+        self.ip_entry.pack(pady=5)
+
+        tk.Label(self.login_window, text="Никнейм:", font=("Arial", 12)).pack(pady=(10, 0))
+
         self.nickname_entry = tk.Entry(self.login_window, font=("Arial", 12), width=20)
-        self.nickname_entry.pack(pady=10)
+        self.nickname_entry.pack(pady=5)
         self.nickname_entry.bind('<Return>', lambda e: self.connect_to_server())
         self.nickname_entry.focus()
-        
-        tk.Button(self.login_window, text="Подключиться", command=self.connect_to_server, 
+
+        tk.Button(self.login_window, text="Подключиться", command=self.connect_to_server,
                  bg="#4CAF50", fg="white", font=("Arial", 10), width=15).pack(pady=5)
-        
-        # НОВОЕ: Кнопка проверки микрофона ДО подключения
+
+        # Кнопка проверки микрофона ДО подключения
         tk.Button(self.login_window, text="🎤 Проверить микрофон", command=self.test_microphone,
                  bg="#FF9800", fg="white", font=("Arial", 10), width=20).pack(pady=5)
-        
+
         self.login_window.mainloop()
     
     def center_window(self, window, width, height):
@@ -125,8 +131,13 @@ class VoiceChatClient:
     
     def connect_to_server(self):
         """Подключение к серверу"""
+        self.HOST = self.ip_entry.get().strip()
         self.nickname = self.nickname_entry.get().strip()
-        
+
+        if not self.HOST:
+            messagebox.showerror("Ошибка", "Введите IP сервера!")
+            return
+
         if not self.nickname:
             messagebox.showerror("Ошибка", "Введите никнейм!")
             return
@@ -145,15 +156,6 @@ class VoiceChatClient:
             # Закрываем окно входа и открываем главное окно
             self.login_window.destroy()
             self.create_chat_window()
-            
-            # Запускаем потоки ПОСЛЕ создания GUI
-            receive_thread = threading.Thread(target=self.receive_messages)
-            receive_thread.daemon = True
-            receive_thread.start()
-            
-            voice_receive_thread = threading.Thread(target=self.receive_voice)
-            voice_receive_thread.daemon = True
-            voice_receive_thread.start()
             
         except Exception as e:
             messagebox.showerror("Ошибка подключения", f"Не удалось подключиться к серверу:\n{e}\n\nУбедитесь что сервер запущен!")
@@ -222,7 +224,16 @@ class VoiceChatClient:
         # Показываем приветствие
         self.display_message("🎉 Добро пожаловать в чат!", "system")
         self.display_message("💡 Команды: /users, /help", "system")
-        
+
+        # Запускаем потоки приёма ПЕРЕД mainloop
+        receive_thread = threading.Thread(target=self.receive_messages)
+        receive_thread.daemon = True
+        receive_thread.start()
+
+        voice_receive_thread = threading.Thread(target=self.receive_voice)
+        voice_receive_thread.daemon = True
+        voice_receive_thread.start()
+
         self.chat_window.mainloop()
     
     def test_microphone_in_chat(self):
@@ -276,23 +287,27 @@ class VoiceChatClient:
         test_thread.start()
     
     def display_message(self, message, msg_type="other"):
-        """Отображает сообщение в чате с цветом"""
-        if self.chat_display:
-            self.chat_display.config(state='normal')
-            
-            # Выбираем тег в зависимости от типа
-            if msg_type == "own":
-                tag = "own_message"
-            elif msg_type == "system":
-                tag = "system_message"
-            elif msg_type == "error":
-                tag = "error_message"
-            else:
-                tag = "other_message"
-            
-            self.chat_display.insert(tk.END, message + '\n', tag)
-            self.chat_display.see(tk.END)
-            self.chat_display.config(state='disabled')
+        """Отображает сообщение в чате с цветом (потокобезопасно)"""
+        def _update():
+            if self.chat_display:
+                self.chat_display.config(state='normal')
+
+                # Выбираем тег в зависимости от типа
+                if msg_type == "own":
+                    tag = "own_message"
+                elif msg_type == "system":
+                    tag = "system_message"
+                elif msg_type == "error":
+                    tag = "error_message"
+                else:
+                    tag = "other_message"
+
+                self.chat_display.insert(tk.END, message + '\n', tag)
+                self.chat_display.see(tk.END)
+                self.chat_display.config(state='disabled')
+
+        if self.chat_window:
+            self.chat_window.after(0, _update)
     
     def send_message(self):
         """Отправка текстового сообщения"""
@@ -334,9 +349,13 @@ class VoiceChatClient:
                 break
     
     def update_status(self, text, color):
-        """Обновляет статус бар"""
-        if self.status_label:
-            self.status_label.config(text=text, bg=color)
+        """Обновляет статус бар (потокобезопасно)"""
+        def _update():
+            if self.status_label:
+                self.status_label.config(text=text, bg=color)
+
+        if self.chat_window:
+            self.chat_window.after(0, _update)
     
     def start_talking(self, event):
         """Начать передачу голоса"""
