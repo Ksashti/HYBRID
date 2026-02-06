@@ -50,7 +50,7 @@ class VoiceChatClient:
         tk.Label(self.login_window, text="IP сервера:", font=("Arial", 12)).pack(pady=(15, 0))
 
         self.ip_entry = tk.Entry(self.login_window, font=("Arial", 12), width=20)
-        self.ip_entry.insert(0, "localhost")
+        self.ip_entry.insert(0, "45.92.218.163")
         self.ip_entry.pack(pady=5)
 
         tk.Label(self.login_window, text="Никнейм:", font=("Arial", 12)).pack(pady=(10, 0))
