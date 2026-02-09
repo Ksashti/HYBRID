@@ -8,21 +8,35 @@ nicknames = []         # Никнеймы
 voice_clients = []     # Клиенты для голоса (отдельное соединение)
 voice_nicknames = []   # Никнеймы для голосовых клиентов (по порядку)
 
-# Определяем локальный IP для вывода
+# Определяем локальный IP для вывода (приоритет 192.168.x.x)
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
+
+        # Если получили Docker/WSL IP (172.17-172.31), пробуем через hostname
+        if ip.startswith('172.'):
+            try:
+                hostname_ip = socket.gethostbyname(socket.gethostname())
+                # Если hostname дал нормальный LAN IP — используем его
+                if hostname_ip.startswith('192.168.') or hostname_ip.startswith('10.'):
+                    return hostname_ip
+            except:
+                pass
+
         return ip
     except:
-        return "не удалось определить"
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except:
+            return "не удалось определить"
 
 # Текстовый сервер (0.0.0.0 = принимать со всех интерфейсов)
 text_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 text_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-text_server.bind(('0.0.0.0', 5555))
+text_server.bind(('0.0.0.0', 5557))
 text_server.listen()
 
 # Голосовой сервер (отдельный порт)
@@ -32,11 +46,11 @@ voice_server.bind(('0.0.0.0', 5556))
 voice_server.listen()
 
 local_ip = get_local_ip()
-print("Текстовый сервер запущен на порту 5555")
+print("Текстовый сервер запущен на порту 5557")
 print("Голосовой сервер запущен на порту 5556")
 print(f"Локальный IP: {local_ip}")
 print(f"Клиенты в локальной сети: вводят {local_ip}")
-print(f"Клиенты из интернета: вводят ваш публичный IP (проброс портов 5555, 5556)")
+print(f"Клиенты из интернета: вводят ваш публичный IP (проброс портов 5557, 5556)")
 print("Ожидание подключений...\n")
 
 
@@ -65,6 +79,17 @@ def send_userlist():
             remove_client(client)
 
 
+def recv_exact(sock, n):
+    """Читает ровно n байт из сокета"""
+    data = b''
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+
 def broadcast_voice(voice_data, sender):
     """Отправляет голосовые данные всем кроме отправителя, с ником в заголовке"""
     sender_nick = ""
@@ -76,11 +101,13 @@ def broadcast_voice(voice_data, sender):
     nick_bytes = sender_nick.encode('utf-8')
     header = struct.pack('>H', len(nick_bytes)) + nick_bytes
     tagged_data = header + voice_data
+    # 4-байтный префикс длины для фрейминга
+    framed = struct.pack('>I', len(tagged_data)) + tagged_data
 
     for client in voice_clients[:]:
         if client != sender:
             try:
-                client.send(tagged_data)
+                client.send(framed)
             except:
                 if client in voice_clients:
                     idx = voice_clients.index(client)
@@ -145,14 +172,20 @@ def handle_text_client(client):
 
 
 def handle_voice_client(voice_client):
-    """Обрабатывает голосовые данные от клиента"""
+    """Обрабатывает голосовые данные от клиента (с фреймингом)"""
     while True:
         try:
-            voice_data = voice_client.recv(4096)
-            if voice_data:
-                broadcast_voice(voice_data, voice_client)
-            else:
+            # Читаем 4-байтный заголовок длины
+            len_data = recv_exact(voice_client, 4)
+            if not len_data:
                 break
+            msg_len = struct.unpack('>I', len_data)[0]
+            if msg_len > 65536:  # защита от мусора
+                break
+            voice_data = recv_exact(voice_client, msg_len)
+            if not voice_data:
+                break
+            broadcast_voice(voice_data, voice_client)
         except:
             if voice_client in voice_clients:
                 idx = voice_clients.index(voice_client)

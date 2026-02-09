@@ -25,7 +25,7 @@ YELLOW = "#faa61a"
 class VoiceChatClient:
     def __init__(self):
         self.HOST = 'localhost'
-        self.TEXT_PORT = 5555
+        self.TEXT_PORT = 5557
         self.VOICE_PORT = 5556
 
         self.text_client = None
@@ -51,6 +51,9 @@ class VoiceChatClient:
         self.selected_output = None
         self.volume = 100
         self.user_volumes = {}  # {nickname: volume 0-200}
+        self.output_stream = None
+        self._restart_output = False
+        self.NOISE_GATE = 200  # RMS порог шумоподавления
 
         self.online_users = []
         self.speaking_users = set()
@@ -159,6 +162,27 @@ class VoiceChatClient:
             self.selected_input = self.input_devices[0][0]
         if self.output_devices:
             self.selected_output = self.output_devices[0][0]
+
+    # ==================== АУДИО УТИЛИТЫ ====================
+
+    def _recv_exact(self, sock, n):
+        """Читает ровно n байт из сокета"""
+        data = b''
+        while len(data) < n:
+            chunk = sock.recv(n - len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data
+
+    def _calc_rms(self, data):
+        """Вычисляет RMS уровень аудио"""
+        total = 0
+        count = len(data) // 2
+        for i in range(0, len(data) - 1, 2):
+            sample = struct.unpack('<h', data[i:i + 2])[0]
+            total += sample * sample
+        return (total / count) ** 0.5 if count > 0 else 0
 
     # ==================== ОКНО ВХОДА ====================
 
@@ -459,6 +483,8 @@ class VoiceChatClient:
                 if name == output_var.get():
                     self.selected_output = idx
                     break
+            self._restart_output = True  # Перезапустить выходной поток
+            self.display_message("Настройки аудио применены!", "system")
             win.destroy()
 
         tk.Button(btn_frame, text="Применить", command=apply_and_close,
@@ -695,17 +721,15 @@ class VoiceChatClient:
                 while self.va_active and self.is_connected:
                     try:
                         data = stream.read(self.CHUNK, exception_on_overflow=False)
-                        rms = 0
-                        for i in range(0, len(data), 2):
-                            if i + 1 < len(data):
-                                sample = struct.unpack('<h', data[i:i+2])[0]
-                                rms += sample * sample
-                        rms = (rms / (len(data) / 2)) ** 0.5
+                        rms = self._calc_rms(data)
                         if rms > THRESHOLD:
-                            self.voice_client.send(data)
+                            frame = struct.pack('>I', len(data)) + data
+                            self.voice_client.send(frame)
                             if not self.is_talking:
                                 self.is_talking = True
                                 self.chat_window.after(0, lambda: self.update_status("Вы говорите", GREEN))
+                            if self.chat_window:
+                                self.chat_window.after(0, lambda: self.highlight_speaking(self.nickname))
                         else:
                             if self.is_talking:
                                 self.is_talking = False
@@ -727,6 +751,8 @@ class VoiceChatClient:
             self.is_talking = True
             self.ptt_button.config(text="ГОВОРИТЕ...", bg=GREEN)
             self.update_status("Вы говорите", GREEN)
+            if self.chat_window:
+                self.chat_window.after(0, lambda: self.highlight_speaking(self.nickname))
             threading.Thread(target=self.send_voice, daemon=True).start()
 
     def stop_talking(self, event):
@@ -744,7 +770,12 @@ class VoiceChatClient:
             while self.is_talking:
                 try:
                     data = stream.read(self.CHUNK, exception_on_overflow=False)
-                    self.voice_client.send(data)
+                    rms = self._calc_rms(data)
+                    if rms > self.NOISE_GATE:
+                        frame = struct.pack('>I', len(data)) + data
+                        self.voice_client.send(frame)
+                        if self.chat_window:
+                            self.chat_window.after(0, lambda: self.highlight_speaking(self.nickname))
                 except:
                     break
             stream.stop_stream()
@@ -758,29 +789,53 @@ class VoiceChatClient:
                 format=self.FORMAT, channels=self.CHANNELS, rate=self.RATE,
                 output=True, frames_per_buffer=self.CHUNK,
                 output_device_index=self.selected_output)
+            self.output_stream = stream
 
             while self.is_connected:
+                # Переключение устройства вывода
+                if self._restart_output:
+                    self._restart_output = False
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except:
+                        pass
+                    stream = self.audio.open(
+                        format=self.FORMAT, channels=self.CHANNELS, rate=self.RATE,
+                        output=True, frames_per_buffer=self.CHUNK,
+                        output_device_index=self.selected_output)
+                    self.output_stream = stream
+
                 try:
-                    raw = self.voice_client.recv(8192)
+                    # Читаем 4-байтный заголовок длины
+                    len_data = self._recv_exact(self.voice_client, 4)
+                    if not len_data:
+                        break
+                    msg_len = struct.unpack('>I', len_data)[0]
+                    if msg_len > 65536:
+                        break
+
+                    raw = self._recv_exact(self.voice_client, msg_len)
                     if not raw:
                         break
+
                     if len(raw) < 2:
                         continue
                     nick_len = struct.unpack('>H', raw[:2])[0]
                     if len(raw) < 2 + nick_len:
                         continue
-                    sender = raw[2:2+nick_len].decode('utf-8')
-                    audio_data = raw[2+nick_len:]
+                    sender = raw[2:2 + nick_len].decode('utf-8')
+                    audio_data = raw[2 + nick_len:]
 
                     if audio_data:
-                        # Громкость: per-user > global
+                        # Громкость: per-user + global
                         user_vol = self.user_volumes.get(sender, 100)
                         vol = (self.volume / 100.0) * (user_vol / 100.0)
 
                         if vol != 1.0:
                             adjusted = bytearray()
                             for i in range(0, len(audio_data) - 1, 2):
-                                sample = struct.unpack('<h', audio_data[i:i+2])[0]
+                                sample = struct.unpack('<h', audio_data[i:i + 2])[0]
                                 sample = int(sample * vol)
                                 sample = max(-32768, min(32767, sample))
                                 adjusted.extend(struct.pack('<h', sample))
