@@ -1,0 +1,12 @@
+{
+  "users": {
+    "testuser": {
+      "password_hash": "a59275f59c0584fe86fa063c3f547ae4$c3d55d6d1ff4e6b6247b15f93b39f166fc38c68587651aec060b97e2581d9ea6",
+      "created_at": "2026-02-10T20:45:41.002753"
+    },
+    "Игорь": {
+      "password_hash": "18bd08194a443e9886e7c822b5aae552$71c23d057340d92cfae9defcfe61888ca74ca7b4e3cca2b1219cab9416b42703",
+      "created_at": "2026-02-10T20:53:22.717375"
+    }
+  }
+}

@@ -153,6 +153,8 @@ def handle_text_client(client):
 
                 if message == 'TYPING':
                     broadcast_text(f"TYPING:{nickname}", exclude_client=client)
+                elif message == 'PING':
+                    send_msg(client, "PONG")
                 elif message.startswith('/'):
                     if message == '/users':
                         users_list = ', '.join(nicknames)

@@ -1,0 +1,16 @@
+{
+  "channels": [
+    {
+      "name": "General",
+      "permanent": true
+    },
+    {
+      "name": "Gaming",
+      "permanent": false
+    },
+    {
+      "name": "123",
+      "permanent": false
+    }
+  ]
+}

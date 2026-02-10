@@ -3,6 +3,7 @@ import threading
 import struct
 import time
 import ctypes
+import select
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import pyaudio
@@ -32,10 +33,10 @@ class VoiceChatClient:
         self.voice_client = None
         self.nickname = ""
 
-        self.CHUNK = 1024
+        self.CHUNK = 960
         self.FORMAT = pyaudio.paInt16
         self.CHANNELS = 1
-        self.RATE = 44100
+        self.RATE = 16000
         self.audio = pyaudio.PyAudio()
 
         self.is_talking = False
@@ -78,6 +79,7 @@ class VoiceChatClient:
         output_names = {}
         try:
             winmm = ctypes.windll.winmm
+            WAVE_MAPPER = 0xFFFFFFFF  # -1 как UINT
 
             class WAVEINCAPSW(ctypes.Structure):
                 _fields_ = [
@@ -102,10 +104,19 @@ class VoiceChatClient:
                     ('dwSupport', ctypes.c_uint),
                 ]
 
+            # Wave Mapper (PortAudio включает его как устройство 0)
+            caps = WAVEINCAPSW()
+            if winmm.waveInGetDevCapsW(WAVE_MAPPER, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
+                input_names[-1] = caps.szPname
+
             for i in range(winmm.waveInGetNumDevs()):
                 caps = WAVEINCAPSW()
                 if winmm.waveInGetDevCapsW(i, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
                     input_names[i] = caps.szPname
+
+            caps = WAVEOUTCAPSW()
+            if winmm.waveOutGetDevCapsW(WAVE_MAPPER, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
+                output_names[-1] = caps.szPname
 
             for i in range(winmm.waveOutGetNumDevs()):
                 caps = WAVEOUTCAPSW()
@@ -132,31 +143,45 @@ class VoiceChatClient:
         except Exception:
             return
 
-        seen_input = set()
-        seen_output = set()
-        mme_in_idx = 0
-        mme_out_idx = 0
-
+        # Собираем устройства из PyAudio
+        pa_inputs = []
+        pa_outputs = []
         for local_idx in range(host_info['deviceCount']):
             try:
                 info = self.audio.get_device_info_by_host_api_device_index(default_host, local_idx)
-                global_idx = info['index']
-
                 if info['maxInputChannels'] > 0:
-                    name = win_in.get(mme_in_idx, info['name'])
-                    mme_in_idx += 1
-                    if name not in seen_input:
-                        self.input_devices.append((global_idx, name))
-                        seen_input.add(name)
-
+                    pa_inputs.append(info)
                 if info['maxOutputChannels'] > 0:
-                    name = win_out.get(mme_out_idx, info['name'])
-                    mme_out_idx += 1
-                    if name not in seen_output:
-                        self.output_devices.append((global_idx, name))
-                        seen_output.add(name)
+                    pa_outputs.append(info)
             except Exception:
                 pass
+
+        # PortAudio может включать Wave Mapper как первое устройство
+        # win_in содержит ключи: -1 (mapper), 0, 1, 2... (реальные устройства)
+        # Определяем offset: если PyAudio устройств на 1 больше чем Windows — есть mapper
+        num_win_in = len([k for k in win_in if k >= 0])
+        num_win_out = len([k for k in win_out if k >= 0])
+        in_offset = 1 if len(pa_inputs) == num_win_in + 1 else 0
+        out_offset = 1 if len(pa_outputs) == num_win_out + 1 else 0
+
+        seen_input = set()
+        seen_output = set()
+
+        for i, info in enumerate(pa_inputs):
+            global_idx = info['index']
+            win_idx = i - in_offset  # -1 = wave mapper, 0+ = реальные устройства
+            name = win_in.get(win_idx, info['name'])
+            if name not in seen_input:
+                self.input_devices.append((global_idx, name))
+                seen_input.add(name)
+
+        for i, info in enumerate(pa_outputs):
+            global_idx = info['index']
+            win_idx = i - out_offset
+            name = win_out.get(win_idx, info['name'])
+            if name not in seen_output:
+                self.output_devices.append((global_idx, name))
+                seen_output.add(name)
 
         if self.input_devices:
             self.selected_input = self.input_devices[0][0]
@@ -184,6 +209,27 @@ class VoiceChatClient:
             total += sample * sample
         return (total / count) ** 0.5 if count > 0 else 0
 
+    # ==================== ХОТКЕИ ====================
+
+    def _fix_ctrl_shortcuts(self, widget):
+        """Фикс Ctrl+C/V/A/X в русской раскладке (по keycode вместо keysym)"""
+        def handler(event):
+            if event.state & 0x4:  # Ctrl зажат
+                if event.keycode == 86:    # V — Вставить
+                    widget.event_generate('<<Paste>>')
+                    return 'break'
+                elif event.keycode == 67:  # C — Копировать
+                    widget.event_generate('<<Copy>>')
+                    return 'break'
+                elif event.keycode == 65:  # A — Выделить всё
+                    widget.select_range(0, 'end')
+                    widget.icursor('end')
+                    return 'break'
+                elif event.keycode == 88:  # X — Вырезать
+                    widget.event_generate('<<Cut>>')
+                    return 'break'
+        widget.bind('<Key>', handler, add='+')
+
     # ==================== ОКНО ВХОДА ====================
 
     def create_login_window(self):
@@ -206,6 +252,7 @@ class VoiceChatClient:
                                  relief='flat', bd=5)
         self.ip_entry.insert(0, "95.37.140.186")
         self.ip_entry.pack(padx=40, fill='x')
+        self._fix_ctrl_shortcuts(self.ip_entry)
 
         tk.Label(self.login_window, text="Никнейм", font=("Arial", 10, "bold"),
                  bg=BG_DARK, fg=TEXT_NORMAL, anchor='w').pack(padx=40, pady=(10, 2), fill='x')
@@ -213,6 +260,7 @@ class VoiceChatClient:
                                        bg=BG_INPUT, fg=TEXT_BRIGHT, insertbackground=TEXT_BRIGHT,
                                        relief='flat', bd=5)
         self.nickname_entry.pack(padx=40, fill='x')
+        self._fix_ctrl_shortcuts(self.nickname_entry)
         self.nickname_entry.bind('<Return>', lambda e: self.connect_to_server())
         self.nickname_entry.focus()
 
@@ -344,7 +392,8 @@ class VoiceChatClient:
         cmd_frame = tk.Frame(chat_area, bg=BG_MAIN)
         cmd_frame.pack(fill='x', padx=10, pady=(0, 2))
 
-        for text, cmd in [("Онлайн", self._cmd_users), ("Тест микро", self.test_microphone_in_chat),
+        for text, cmd in [("Онлайн", self._cmd_users), ("Пинг", self._cmd_ping),
+                          ("Тест микро", self.test_microphone_in_chat),
                           ("Отключиться", self.on_closing)]:
             btn = tk.Button(cmd_frame, text=text, command=cmd,
                             bg=BG_INPUT, fg=TEXT_MUTED, font=("Arial", 8),
@@ -360,6 +409,7 @@ class VoiceChatClient:
                                        bg=BG_INPUT, fg=TEXT_BRIGHT, insertbackground=TEXT_BRIGHT,
                                        relief='flat', bd=8)
         self.message_entry.pack(side='left', fill='x', expand=True)
+        self._fix_ctrl_shortcuts(self.message_entry)
         self.message_entry.bind('<Return>', lambda e: self.send_message())
         self.message_entry.bind('<Key>', self._on_key_press)
         self.message_entry.focus()
@@ -416,15 +466,17 @@ class VoiceChatClient:
     # ==================== НАСТРОЙКИ (POPUP) ====================
 
     def open_settings(self):
-        """Открывает окно настроек аудиоустройств"""
+        """Открывает окно настроек аудиоустройств с живым тестом микрофона"""
         win = tk.Toplevel(self.chat_window)
         win.title("Настройки")
-        win.geometry("420x300")
+        win.geometry("420x380")
         win.configure(bg=BG_DARK)
         win.resizable(False, False)
-        self.center_window(win, 420, 300)
+        self.center_window(win, 420, 380)
         win.transient(self.chat_window)
         win.grab_set()
+
+        testing = {'active': False, 'stream': None}
 
         tk.Label(win, text="Настройки аудио", font=("Arial", 14, "bold"),
                  bg=BG_DARK, fg=TEXT_BRIGHT).pack(pady=(15, 10))
@@ -435,7 +487,6 @@ class VoiceChatClient:
 
         input_var = tk.StringVar()
         input_names = [d[1] for d in self.input_devices] if self.input_devices else ["Нет устройств"]
-        # Найти текущий
         current_input = input_names[0]
         for idx, name in self.input_devices:
             if idx == self.selected_input:
@@ -448,7 +499,7 @@ class VoiceChatClient:
                              relief='flat', bd=0, highlightthickness=0, width=40,
                              activebackground=BG_HOVER, activeforeground=TEXT_BRIGHT)
         input_menu["menu"].configure(bg=BG_INPUT, fg=TEXT_BRIGHT, activebackground=ACCENT)
-        input_menu.pack(padx=20, pady=(2, 10), fill='x')
+        input_menu.pack(padx=20, pady=(2, 8), fill='x')
 
         # Динамики
         tk.Label(win, text="Динамики (вывод)", font=("Arial", 10, "bold"),
@@ -468,13 +519,79 @@ class VoiceChatClient:
                               relief='flat', bd=0, highlightthickness=0, width=40,
                               activebackground=BG_HOVER, activeforeground=TEXT_BRIGHT)
         output_menu["menu"].configure(bg=BG_INPUT, fg=TEXT_BRIGHT, activebackground=ACCENT)
-        output_menu.pack(padx=20, pady=(2, 10), fill='x')
+        output_menu.pack(padx=20, pady=(2, 8), fill='x')
+
+        # Живой тест микрофона
+        tk.Label(win, text="Проверка микрофона", font=("Arial", 10, "bold"),
+                 bg=BG_DARK, fg=TEXT_NORMAL, anchor='w').pack(padx=20, fill='x', pady=(5, 0))
+
+        mic_frame = tk.Frame(win, bg=BG_DARK)
+        mic_frame.pack(padx=20, fill='x', pady=5)
+
+        level_canvas = tk.Canvas(mic_frame, height=20, bg=BG_INPUT, highlightthickness=0)
+        level_canvas.pack(side='left', fill='x', expand=True, padx=(0, 10))
+        level_bar = level_canvas.create_rectangle(0, 0, 0, 20, fill=GREEN, outline='')
+
+        def update_bar(width, color):
+            if level_canvas.winfo_exists():
+                level_canvas.coords(level_bar, 0, 0, width, 20)
+                level_canvas.itemconfig(level_bar, fill=color)
+
+        def toggle_mic_test():
+            if testing['active']:
+                testing['active'] = False
+                test_btn.config(text="Тест", bg=BG_INPUT)
+                level_canvas.coords(level_bar, 0, 0, 0, 20)
+            else:
+                sel_input = self.selected_input
+                for idx, name in self.input_devices:
+                    if name == input_var.get():
+                        sel_input = idx
+                        break
+                testing['active'] = True
+                test_btn.config(text="Стоп", bg=RED)
+
+                def mic_loop():
+                    try:
+                        stream = self.audio.open(
+                            format=self.FORMAT, channels=self.CHANNELS, rate=self.RATE,
+                            input=True, frames_per_buffer=self.CHUNK,
+                            input_device_index=sel_input)
+                        testing['stream'] = stream
+                        while testing['active'] and win.winfo_exists():
+                            try:
+                                data = stream.read(self.CHUNK, exception_on_overflow=False)
+                                rms = self._calc_rms(data)
+                                level = min(rms / 8000.0, 1.0)
+                                canvas_w = level_canvas.winfo_width()
+                                bar_w = int(canvas_w * level)
+                                color = GREEN if level < 0.3 else (YELLOW if level < 0.7 else RED)
+                                if win.winfo_exists():
+                                    win.after(0, lambda w=bar_w, c=color: update_bar(w, c))
+                            except:
+                                break
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception:
+                        pass
+                    finally:
+                        testing['active'] = False
+                        testing['stream'] = None
+
+                threading.Thread(target=mic_loop, daemon=True).start()
+
+        test_btn = tk.Button(mic_frame, text="Тест", command=toggle_mic_test,
+                             bg=BG_INPUT, fg=TEXT_NORMAL, font=("Arial", 9),
+                             relief='flat', bd=0, padx=12, pady=3,
+                             activebackground=BG_HOVER)
+        test_btn.pack(side='right')
 
         # Кнопки
         btn_frame = tk.Frame(win, bg=BG_DARK)
         btn_frame.pack(padx=20, pady=10, fill='x')
 
         def apply_and_close():
+            testing['active'] = False
             for idx, name in self.input_devices:
                 if name == input_var.get():
                     self.selected_input = idx
@@ -483,16 +600,22 @@ class VoiceChatClient:
                 if name == output_var.get():
                     self.selected_output = idx
                     break
-            self._restart_output = True  # Перезапустить выходной поток
+            self._restart_output = True
             self.display_message("Настройки аудио применены!", "system")
             win.destroy()
+
+        def on_close():
+            testing['active'] = False
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
 
         tk.Button(btn_frame, text="Применить", command=apply_and_close,
                   bg=ACCENT, fg=TEXT_BRIGHT, font=("Arial", 10, "bold"),
                   relief='flat', bd=0, padx=15, pady=5,
                   activebackground="#677bc4").pack(side='left')
 
-        tk.Button(btn_frame, text="Тест микрофона", command=self.test_microphone_in_chat,
+        tk.Button(btn_frame, text="Закрыть", command=on_close,
                   bg=BG_INPUT, fg=TEXT_NORMAL, font=("Arial", 10),
                   relief='flat', bd=0, padx=15, pady=5,
                   activebackground=BG_HOVER).pack(side='right')
@@ -636,10 +759,21 @@ class VoiceChatClient:
             self.chat_window.after(0, _update)
             self.chat_window.after(3000, _clear)
 
+    def _cmd_ping(self):
+        self._ping_time = time.time()
+        try:
+            self.text_client.send("PING\n".encode('utf-8'))
+        except:
+            pass
+
     def _process_line(self, line):
         """Обрабатывает одну строку от сервера"""
         if line == "NICK":
             self.text_client.send((self.nickname + "\n").encode('utf-8'))
+        elif line == "PONG":
+            if hasattr(self, '_ping_time'):
+                ping_ms = int((time.time() - self._ping_time) * 1000)
+                self.display_message(f"Пинг: {ping_ms} мс", "system")
         elif line == "NICK_TAKEN":
             self.display_message("Этот никнейм уже занят!", "error")
             self.is_connected = False
@@ -806,6 +940,11 @@ class VoiceChatClient:
                         output_device_index=self.selected_output)
                     self.output_stream = stream
 
+                # Ждём данные с таймаутом (для проверки _restart_output)
+                ready = select.select([self.voice_client], [], [], 0.3)
+                if not ready[0]:
+                    continue
+
                 try:
                     # Читаем 4-байтный заголовок длины
                     len_data = self._recv_exact(self.voice_client, 4)
@@ -866,56 +1005,70 @@ class VoiceChatClient:
             self.chat_window.after(0, _update)
 
     def test_microphone(self):
+        """Живой тест микрофона в отдельном окне"""
         if self.is_testing_mic:
             return
-        self.is_testing_mic = True
-        def record_and_play():
+
+        win = tk.Toplevel(self.login_window)
+        win.title("Тест микрофона")
+        win.geometry("350x130")
+        win.configure(bg=BG_DARK)
+        win.resizable(False, False)
+        self.center_window(win, 350, 130)
+        win.transient(self.login_window)
+
+        tk.Label(win, text="Говорите — уровень отображается в реальном времени",
+                 font=("Arial", 9), bg=BG_DARK, fg=TEXT_MUTED).pack(pady=(15, 5))
+
+        level_canvas = tk.Canvas(win, height=25, bg=BG_INPUT, highlightthickness=0)
+        level_canvas.pack(padx=20, pady=10, fill='x')
+        level_bar = level_canvas.create_rectangle(0, 0, 0, 25, fill=GREEN, outline='')
+
+        testing = {'active': True}
+
+        def mic_loop():
             try:
-                messagebox.showinfo("Тест", "Запись 3 секунды. Говорите!\n\nOK для старта.")
-                stream = self.audio.open(format=self.FORMAT, channels=self.CHANNELS,
-                                         rate=self.RATE, input=True, frames_per_buffer=self.CHUNK,
-                                         input_device_index=self.selected_input)
-                frames = [stream.read(self.CHUNK, exception_on_overflow=False)
-                          for _ in range(int(self.RATE / self.CHUNK * 3))]
-                stream.stop_stream(); stream.close()
-                messagebox.showinfo("Тест", "Воспроизвожу...\n\nOK.")
-                stream = self.audio.open(format=self.FORMAT, channels=self.CHANNELS,
-                                         rate=self.RATE, output=True,
-                                         output_device_index=self.selected_output)
-                for f in frames: stream.write(f)
-                stream.stop_stream(); stream.close()
-                messagebox.showinfo("Тест", "Готово! Если слышали себя - работает!")
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Ошибка теста:\n{e}")
-            finally:
-                self.is_testing_mic = False
-        threading.Thread(target=record_and_play, daemon=True).start()
+                stream = self.audio.open(
+                    format=self.FORMAT, channels=self.CHANNELS, rate=self.RATE,
+                    input=True, frames_per_buffer=self.CHUNK,
+                    input_device_index=self.selected_input)
+                while testing['active'] and win.winfo_exists():
+                    try:
+                        data = stream.read(self.CHUNK, exception_on_overflow=False)
+                        rms = self._calc_rms(data)
+                        level = min(rms / 8000.0, 1.0)
+                        canvas_w = level_canvas.winfo_width()
+                        bar_w = int(canvas_w * level)
+                        color = GREEN if level < 0.3 else (YELLOW if level < 0.7 else RED)
+                        if win.winfo_exists():
+                            win.after(0, lambda w=bar_w, c=color: _update(w, c))
+                    except:
+                        break
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
+
+        def _update(width, color):
+            if level_canvas.winfo_exists():
+                level_canvas.coords(level_bar, 0, 0, width, 25)
+                level_canvas.itemconfig(level_bar, fill=color)
+
+        def on_close():
+            testing['active'] = False
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        tk.Button(win, text="Закрыть", command=on_close,
+                  bg=BG_INPUT, fg=TEXT_NORMAL, font=("Arial", 10),
+                  relief='flat', bd=0, padx=15, pady=5,
+                  activebackground=BG_HOVER).pack(pady=5)
+
+        threading.Thread(target=mic_loop, daemon=True).start()
 
     def test_microphone_in_chat(self):
-        if self.is_testing_mic:
-            return
-        self.is_testing_mic = True
-        self.display_message("Тест микрофона... Говорите 3 секунды!", "system")
-        def record_and_play():
-            try:
-                stream = self.audio.open(format=self.FORMAT, channels=self.CHANNELS,
-                                         rate=self.RATE, input=True, frames_per_buffer=self.CHUNK,
-                                         input_device_index=self.selected_input)
-                frames = [stream.read(self.CHUNK, exception_on_overflow=False)
-                          for _ in range(int(self.RATE / self.CHUNK * 3))]
-                stream.stop_stream(); stream.close()
-                self.display_message("Воспроизвожу...", "system")
-                stream = self.audio.open(format=self.FORMAT, channels=self.CHANNELS,
-                                         rate=self.RATE, output=True,
-                                         output_device_index=self.selected_output)
-                for f in frames: stream.write(f)
-                stream.stop_stream(); stream.close()
-                self.display_message("Тест завершён!", "system")
-            except Exception as e:
-                self.display_message(f"Ошибка теста: {e}", "error")
-            finally:
-                self.is_testing_mic = False
-        threading.Thread(target=record_and_play, daemon=True).start()
+        """Открывает настройки для теста микрофона"""
+        self.open_settings()
 
     def on_closing(self):
         self.is_connected = False

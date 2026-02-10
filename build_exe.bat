@@ -1,21 +1,28 @@
 @echo off
 echo ========================================
-echo Создание EXE файла для Voice Chat Client
+echo   HYBRID VoiceChat v2.0 - Build EXE
 echo ========================================
 echo.
 
-echo Шаг 1: Проверка установленных библиотек...
+echo Step 1: Installing dependencies...
 pip install -r requirements.txt
 echo.
 
-echo Шаг 2: Создание EXE файла...
-pyinstaller --onefile --windowed --name="VoiceChat" --icon=NONE client_gui.py
+echo Step 2: Building client EXE...
+pyinstaller --onefile --windowed --name="HYBRID" --icon=NONE ^
+    --add-data "client;client" ^
+    --hidden-import PyQt5.QtWidgets ^
+    --hidden-import PyQt5.QtCore ^
+    --hidden-import PyQt5.QtGui ^
+    --hidden-import opuslib ^
+    client/main.py
 echo.
 
 echo ========================================
-echo ГОТОВО!
+echo   DONE!
 echo ========================================
 echo.
-echo EXE файл находится в папке: dist\VoiceChat.exe
+echo Client EXE: dist\HYBRID.exe
+echo Server: python server/main.py
 echo.
 pause
